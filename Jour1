@@ -8,11 +8,11 @@ from typing import Any
 
 
 class SoldeInsuffisantError(Exception):
-    """Le solde du compte est insuffisant pour effectuer l'opération."""
+    """Insufficient account balance to perform the operation"""
 
 
 class PlafondDepasserError(Exception):
-    """Le montant dépasse le plafond autorisé."""
+    """The amount exceeds the authorized limit"""
 
 
 @dataclass
