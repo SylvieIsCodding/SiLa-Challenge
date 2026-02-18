@@ -1,0 +1,176 @@
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from datetime import datetime
+import json
+from pathlib import Path
+from typing import Any
+
+
+class SoldeInsuffisantError(Exception):
+    """Le solde du compte est insuffisant pour effectuer l'opération."""
+
+
+class PlafondDepasserError(Exception):
+    """Le montant dépasse le plafond autorisé."""
+
+
+@dataclass
+class Compte:
+    numero: str
+    titulaire: str
+    solde: float = 0.0
+    historique: list[dict[str, Any]] = field(default_factory=list)
+
+    def deposer(self, montant: float) -> None:
+        self._valider_montant(montant)
+        self.solde += montant
+        self._enregistrer_transaction("depot", montant)
+
+    def retirer(self, montant: float) -> None:
+        self._valider_montant(montant)
+        if montant > self.solde:
+            raise SoldeInsuffisantError(
+                f"Retrait impossible: solde actuel {self.solde:.2f}, montant demandé {montant:.2f}."
+            )
+        self.solde -= montant
+        self._enregistrer_transaction("retrait", montant)
+
+    def virement(self, montant: float, compte_cible: "Compte") -> None:
+        if self.numero == compte_cible.numero:
+            raise ValueError("Un virement vers le même compte est interdit.")
+        self._valider_montant(montant)
+        self.retirer(montant)
+        compte_cible.solde += montant
+        compte_cible._enregistrer_transaction(
+            "virement_recu", montant, meta={"source": self.numero}
+        )
+        self._enregistrer_transaction(
+            "virement_emis", montant, meta={"destination": compte_cible.numero}
+        )
+
+    def _valider_montant(self, montant: float) -> None:
+        if montant <= 0:
+            raise ValueError("Le montant doit être strictement positif.")
+
+    def _enregistrer_transaction(
+        self, operation: str, montant: float, meta: dict[str, Any] | None = None
+    ) -> None:
+        entree = {
+            "timestamp": datetime.now().isoformat(timespec="seconds"),
+            "operation": operation,
+            "montant": round(montant, 2),
+            "solde_apres": round(self.solde, 2),
+        }
+        if meta:
+            entree.update(meta)
+        self.historique.append(entree)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "type": self.__class__.__name__,
+            "numero": self.numero,
+            "titulaire": self.titulaire,
+            "solde": self.solde,
+            "historique": self.historique,
+        }
+
+
+@dataclass
+class CompteEpargne(Compte):
+    plafond_retrait: float = 1_000.0
+
+    def retirer(self, montant: float) -> None:
+        if montant > self.plafond_retrait:
+            raise PlafondDepasserError(
+                f"Plafond de retrait ({self.plafond_retrait:.2f}) dépassé."
+            )
+        super().retirer(montant)
+
+    def to_dict(self) -> dict[str, Any]:
+        data = super().to_dict()
+        data["plafond_retrait"] = self.plafond_retrait
+        return data
+
+
+@dataclass
+class ComptePro(Compte):
+    plafond_virement: float = 10_000.0
+
+    def virement(self, montant: float, compte_cible: "Compte") -> None:
+        if montant > self.plafond_virement:
+            raise PlafondDepasserError(
+                f"Plafond de virement ({self.plafond_virement:.2f}) dépassé."
+            )
+        super().virement(montant, compte_cible)
+
+    def to_dict(self) -> dict[str, Any]:
+        data = super().to_dict()
+        data["plafond_virement"] = self.plafond_virement
+        return data
+
+
+class Banque:
+    def __init__(self) -> None:
+        self.comptes: dict[str, Compte] = {}
+
+    def ajouter_compte(self, compte: Compte) -> None:
+        if compte.numero in self.comptes:
+            raise ValueError(f"Le compte {compte.numero} existe déjà.")
+        self.comptes[compte.numero] = compte
+
+    def sauvegarder_json(self, chemin: str | Path) -> None:
+        contenu = [compte.to_dict() for compte in self.comptes.values()]
+        Path(chemin).write_text(
+            json.dumps(contenu, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+
+    def charger_json(self, chemin: str | Path) -> None:
+        chemin = Path(chemin)
+        if not chemin.exists():
+            return
+        data = json.loads(chemin.read_text(encoding="utf-8"))
+        self.comptes = {}
+        for item in data:
+            compte = self._compte_depuis_dict(item)
+            self.comptes[compte.numero] = compte
+
+    @staticmethod
+    def _compte_depuis_dict(data: dict[str, Any]) -> Compte:
+        type_compte = data.get("type", "Compte")
+        mapping = {
+            "Compte": Compte,
+            "CompteEpargne": CompteEpargne,
+            "ComptePro": ComptePro,
+        }
+        cls = mapping.get(type_compte)
+        if cls is None:
+            raise ValueError(f"Type de compte inconnu: {type_compte}")
+
+        kwargs = {
+            "numero": data["numero"],
+            "titulaire": data["titulaire"],
+            "solde": data.get("solde", 0.0),
+            "historique": data.get("historique", []),
+        }
+        if cls is CompteEpargne:
+            kwargs["plafond_retrait"] = data.get("plafond_retrait", 1_000.0)
+        if cls is ComptePro:
+            kwargs["plafond_virement"] = data.get("plafond_virement", 10_000.0)
+        return cls(**kwargs)
+
+
+if __name__ == "__main__":
+    banque = Banque()
+    compte_a = CompteEpargne(numero="CE-100", titulaire="Alice", solde=5000)
+    compte_b = ComptePro(numero="CP-200", titulaire="Bob SARL", solde=15000)
+
+    banque.ajouter_compte(compte_a)
+    banque.ajouter_compte(compte_b)
+
+    compte_a.deposer(250)
+    compte_a.retirer(100)
+    compte_b.virement(1200, compte_a)
+
+    banque.sauvegarder_json("banque.json")
+    print("Données sauvegardées dans banque.json")
